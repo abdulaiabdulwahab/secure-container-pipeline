@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: secure-api
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: secure-api
+
+  template:
+    metadata:
+      labels:
+        app: secure-api
+
+    spec:
+
+      # Pod-level security.
+      securityContext:
+        runAsNonRoot: true
+
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: secure-api
+
+          # Pipeline will eventually replace this.
+          image: secure-api:latest
+
+          ports:
+            - containerPort: 8080
+
+          securityContext:
+
+            # Prevent privilege escalation.
+            allowPrivilegeEscalation: false
+
+            # Container filesystem should be immutable
+            # where possible.
+            readOnlyRootFilesystem: true
+
+            # Remove Linux capabilities.
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

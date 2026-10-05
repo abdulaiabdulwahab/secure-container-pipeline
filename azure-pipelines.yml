@@ -1,0 +1,144 @@
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+
+variables:
+
+  # Change these values for your ACR.
+  ACR_NAME: 'acrdevsecops212779116'
+
+  ACR_LOGIN_SERVER: 'acrdevsecops212779116.azurecr.io'
+
+  IMAGE_NAME: 'secure-api'
+
+  # Pin the scanner rather than relying on an
+  # uncontrolled "latest" version.
+  TRIVY_VERSION: 'v0.74.0'
+
+
+steps:
+
+# ========================================
+# 1. Checkout source
+# ========================================
+
+- checkout: self
+
+
+# ========================================
+# 2. Microsoft Security DevOps scanning
+# ========================================
+
+- task: MicrosoftSecurityDevOps@1
+
+  displayName: 'DevSecOps - SAST and IaC Scan'
+
+  inputs:
+
+    # Scan source code and infrastructure.
+    categories: 'code,IaC'
+
+    # Bandit scans Python.
+    # Checkov scans infrastructure/configuration.
+    tools: 'bandit,checkov'
+
+    # Fail the security step when high-severity
+    # findings are detected.
+    break: true
+
+    # Publish SARIF security results.
+    publish: true
+
+    artifactName: 'CodeAnalysisLogs'
+
+
+# ========================================
+# 3. Install Trivy
+# ========================================
+
+- bash: |
+
+    curl -sfL \
+      https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+      | sudo sh -s -- \
+        -b /usr/local/bin \
+        $(TRIVY_VERSION)
+
+    trivy --version
+
+  displayName: 'Install Trivy'
+
+
+# ========================================
+# 4. Dependency + secret + config scan
+# ========================================
+
+- bash: |
+
+    trivy fs \
+      --scanners vuln,secret,misconfig \
+      --severity HIGH,CRITICAL \
+      --exit-code 1 \
+      .
+
+  displayName: 'DevSecOps - Repository Security Gate'
+
+
+# ========================================
+# 5. Build container
+# ========================================
+
+- bash: |
+
+    docker build \
+      -t $(IMAGE_NAME):$(Build.BuildId) \
+      .
+
+  displayName: 'Build Container Image'
+
+
+# ========================================
+# 6. Scan built container
+# ========================================
+
+- bash: |
+
+    trivy image \
+      --severity HIGH,CRITICAL \
+      --exit-code 1 \
+      $(IMAGE_NAME):$(Build.BuildId)
+
+  displayName: 'DevSecOps - Container Security Gate'
+
+
+# ========================================
+# 7. Authenticate and push only after
+#    all security checks succeed
+# ========================================
+
+- task: AzureCLI@2
+
+  displayName: 'Push Approved Image to ACR'
+
+  inputs:
+
+    azureSubscription: 'sc-azure-devsecops'
+
+    scriptType: bash
+
+    scriptLocation: inlineScript
+
+    inlineScript: |
+
+      az acr login \
+        --name $(ACR_NAME)
+
+      docker tag \
+        $(IMAGE_NAME):$(Build.BuildId) \
+        $(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)
+
+      docker push \
+        $(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)
