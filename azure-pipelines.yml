@@ -1,36 +1,97 @@
+# ============================================================
+# DevSecOps Secure Container Pipeline
+#
+# Workflow:
+#   1. Checkout source code
+#   2. Run Microsoft Security DevOps scans
+#   3. Install Trivy
+#   4. Scan repository
+#   5. Build Docker image
+#   6. Generate full container vulnerability report
+#   7. Block fixable HIGH/CRITICAL vulnerabilities
+#   8. Push approved image to Azure Container Registry
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Trigger pipeline whenever code is pushed to main
+# ------------------------------------------------------------
+
 trigger:
-  - main
+  branches:
+    include:
+      - main
+
+
+# ------------------------------------------------------------
+# Microsoft-hosted build agent
+# ------------------------------------------------------------
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: 'ubuntu-latest'
 
+
+# ------------------------------------------------------------
+# Pipeline Variables
+#
+# IMPORTANT:
+# Replace YOUR_ACR_NAME with your actual ACR name.
+#
+# Example:
+#   ACR_NAME: 'acrdevsecops12345'
+# ------------------------------------------------------------
 
 variables:
 
-  # Change these values for your ACR.
+  # Azure Container Registry name
   ACR_NAME: 'acrdevsecops212779116'
 
+  # ACR login server
   ACR_LOGIN_SERVER: 'acrdevsecops212779116.azurecr.io'
 
+  # Docker image repository name
   IMAGE_NAME: 'secure-api'
 
-  # Pin the scanner rather than relying on an
-  # uncontrolled "latest" version.
-  TRIVY_VERSION: 'v0.74.0'
+  # Trivy version
+  TRIVY_VERSION: 'v0.75.0'
 
+
+# ============================================================
+# PIPELINE STEPS
+# ============================================================
 
 steps:
 
-# ========================================
-# 1. Checkout source
-# ========================================
+
+# ============================================================
+# STEP 1
+# Checkout Repository
+# ============================================================
 
 - checkout: self
 
+  displayName: 'Checkout Source Code'
 
-# ========================================
-# 2. Microsoft Security DevOps scanning
-# ========================================
+  # Allows the pipeline to access the complete repository.
+  fetchDepth: 0
+
+
+# ============================================================
+# STEP 2
+# Microsoft Security DevOps
+#
+# Bandit:
+#   Scans Python source code for security issues.
+#
+# Checkov:
+#   Scans Kubernetes/IaC files for insecure configurations.
+#
+# break: true
+#   Allows serious findings to fail the security task.
+#
+# publish: true
+#   Publishes SARIF security results.
+# ============================================================
 
 - task: MicrosoftSecurityDevOps@1
 
@@ -38,28 +99,33 @@ steps:
 
   inputs:
 
-    # Scan source code and infrastructure.
     categories: 'code,IaC'
 
-    # Bandit scans Python.
-    # Checkov scans infrastructure/configuration.
     tools: 'bandit,checkov'
 
-    # Fail the security step when high-severity
-    # findings are detected.
     break: true
 
-    # Publish SARIF security results.
     publish: true
 
     artifactName: 'CodeAnalysisLogs'
 
 
-# ========================================
-# 3. Install Trivy
-# ========================================
+# ============================================================
+# STEP 3
+# Install Trivy
+#
+# Trivy will be used for:
+#   - Dependency scanning
+#   - Secret scanning
+#   - Misconfiguration scanning
+#   - Container vulnerability scanning
+# ============================================================
 
 - bash: |
+
+    echo "=========================================="
+    echo "Installing Trivy $(TRIVY_VERSION)"
+    echo "=========================================="
 
     curl -sfL \
       https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
@@ -67,16 +133,30 @@ steps:
         -b /usr/local/bin \
         $(TRIVY_VERSION)
 
+    echo ""
+    echo "Installed Trivy version:"
     trivy --version
 
   displayName: 'Install Trivy'
 
 
-# ========================================
-# 4. Dependency + secret + config scan
-# ========================================
+# ============================================================
+# STEP 4
+# Repository Security Scan
+#
+# Scans:
+#   vuln      = vulnerable dependencies
+#   secret    = exposed credentials/secrets
+#   misconfig = Docker/Kubernetes/IaC misconfigurations
+#
+# HIGH or CRITICAL findings will cause this stage to fail.
+# ============================================================
 
 - bash: |
+
+    echo "=========================================="
+    echo "Scanning Repository"
+    echo "=========================================="
 
     trivy fs \
       --scanners vuln,secret,misconfig \
@@ -87,37 +167,117 @@ steps:
   displayName: 'DevSecOps - Repository Security Gate'
 
 
-# ========================================
-# 5. Build container
-# ========================================
+# ============================================================
+# STEP 5
+# Build Docker Image
+#
+# --pull
+#   Downloads the latest available version of the base image.
+#
+# --no-cache
+#   Prevents stale cached Docker layers from being reused.
+#
+# Build.BuildId provides a unique image tag for every build.
+# ============================================================
 
 - bash: |
 
+    echo "=========================================="
+    echo "Building Docker Image"
+    echo "=========================================="
+
     docker build \
+      --pull \
+      --no-cache \
       -t $(IMAGE_NAME):$(Build.BuildId) \
       .
+
+    echo ""
+    echo "Docker image created:"
+    docker images $(IMAGE_NAME)
 
   displayName: 'Build Container Image'
 
 
-# ========================================
-# 6. Scan built container
-# ========================================
+# ============================================================
+# STEP 6
+# Full Container Vulnerability Report
+#
+# This scan REPORTS every HIGH and CRITICAL vulnerability.
+#
+# --exit-code 0
+#   Means findings are displayed but this particular step
+#   does NOT fail the pipeline.
+#
+# This gives us visibility into vulnerabilities even when
+# no vendor fix currently exists.
+# ============================================================
 
 - bash: |
 
+    echo "=========================================="
+    echo "Full Container Vulnerability Report"
+    echo "=========================================="
+
     trivy image \
       --severity HIGH,CRITICAL \
+      --exit-code 0 \
+      $(IMAGE_NAME):$(Build.BuildId)
+
+  displayName: 'Trivy - Full Vulnerability Report'
+
+
+# ============================================================
+# STEP 7
+# Container Security Gate
+#
+# This is the actual blocking security check.
+#
+# --ignore-unfixed
+#   Ignores vulnerabilities for which there is currently
+#   no vendor-provided fix.
+#
+# --severity HIGH,CRITICAL
+#   Only HIGH and CRITICAL vulnerabilities are considered.
+#
+# --exit-code 1
+#   Causes Azure Pipelines to fail when fixable HIGH or
+#   CRITICAL vulnerabilities are detected.
+# ============================================================
+
+- bash: |
+
+    echo "=========================================="
+    echo "Container Security Gate"
+    echo "=========================================="
+
+    echo "Blocking fixable HIGH and CRITICAL vulnerabilities..."
+
+    trivy image \
+      --severity HIGH,CRITICAL \
+      --ignore-unfixed \
       --exit-code 1 \
       $(IMAGE_NAME):$(Build.BuildId)
+
+    echo ""
+    echo "Container security gate passed."
 
   displayName: 'DevSecOps - Container Security Gate'
 
 
-# ========================================
-# 7. Authenticate and push only after
-#    all security checks succeed
-# ========================================
+# ============================================================
+# STEP 8
+# Push Security-Approved Image to ACR
+#
+# This step runs ONLY if all previous blocking security
+# checks succeed.
+#
+# Service connection:
+#   sc-azure-devsecops
+#
+# The service principal behind the connection requires
+# permission to push to ACR.
+# ============================================================
 
 - task: AzureCLI@2
 
@@ -125,20 +285,47 @@ steps:
 
   inputs:
 
+    # Azure DevOps service connection using
+    # Workload Identity Federation
     azureSubscription: 'sc-azure-devsecops'
 
-    scriptType: bash
+    scriptType: 'bash'
 
-    scriptLocation: inlineScript
+    scriptLocation: 'inlineScript'
 
     inlineScript: |
 
+      echo "=========================================="
+      echo "Authenticating to Azure Container Registry"
+      echo "=========================================="
+
       az acr login \
         --name $(ACR_NAME)
+
+
+      echo ""
+      echo "=========================================="
+      echo "Tagging Docker Image"
+      echo "=========================================="
 
       docker tag \
         $(IMAGE_NAME):$(Build.BuildId) \
         $(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)
 
+
+      echo ""
+      echo "=========================================="
+      echo "Pushing Image to ACR"
+      echo "=========================================="
+
       docker push \
         $(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)
+
+
+      echo ""
+      echo "=========================================="
+      echo "Image Successfully Published"
+      echo "=========================================="
+
+      echo "Image:"
+      echo "$(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)"
