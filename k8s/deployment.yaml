@@ -36,7 +36,17 @@ spec:
 
           securityContext:
 
-           privileged: true
+            # Prevent privilege escalation.
+            allowPrivilegeEscalation: false
+
+            # Container filesystem should be immutable
+            # where possible.
+            readOnlyRootFilesystem: true
+
+            # Remove Linux capabilities.
+            capabilities:
+              drop:
+                - ALL
 
           resources:
             requests:
